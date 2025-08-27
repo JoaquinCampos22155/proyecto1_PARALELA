@@ -1,3 +1,7 @@
+// main.cpp — Secuencial con overlay de FPS (tecla F) + barra inferior de FPS
+// Compilar (MSYS2/MinGW64):
+//   g++ -O2 -std=c++17 -Wall -Wextra -Wshadow main.cpp -o screensaver $(pkg-config --cflags --libs sdl2 SDL2_ttf)
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <cmath>
@@ -18,7 +22,9 @@ static int   toInt  (const std::string& s, int def){ try{ return std::stoi(s);}c
 // Círculo relleno sin libs extra (SDL2)
 static void drawFilledCircle(SDL_Renderer* r, int cx, int cy, int radius) {
     for (int y = -radius; y <= radius; ++y) {
-        int dx = (int)std::floor(std::sqrt((double)radius*radius - y*y));
+        int inside = radius*radius - y*y;
+        if (inside < 0) continue;
+        int dx = (int)std::floor(std::sqrt((double)inside));
         SDL_RenderDrawLine(r, cx - dx, cy + y, cx + dx, cy + y);
     }
 }
@@ -47,7 +53,7 @@ struct SimParams {
     float mainInitSpeed=100.f; // rapidez inicial
     float mainDamping=1.0f;    // 1.0 = sin amortiguación
     float mainSignA=+1.f;      // +1 atrae, -1 repele (verde)
-    float mainSignB=-1.f;      // +1 atrae, -1 repele (rojo) 
+    float mainSignB=-1.f;      // +1 atrae, -1 repele (rojo)
 
     // Satélites
     float satRadius=4.f;
@@ -213,21 +219,43 @@ static void drawText(SDL_Renderer* r, int x, int y, SDL_Color col, const std::st
     drawBlocksText(r, x, y, col, s);
 }
 
-// ---------------- Render ----------------
-static void renderFPSColumn(SDL_Renderer* r, const std::vector<float>& fpsHist) {
-    const int x0 = 10, y0 = 10, dy = 18;
-    drawText(r, x0, y0, {200,200,200,255}, "FPS (ultimos 10)");
-    for (size_t i=0;i<fpsHist.size(); ++i) {
-        int val = (int)std::round(fpsHist[i]);
-        drawText(r, x0, y0 + (int)((i+1)*dy), {240,240,240,255}, std::to_string(val));
+// ---------------- Barra inferior de FPS (abajo) ----------------
+static void renderFPSBottomBar(SDL_Renderer* renderer, const std::vector<float>& fpsHist, int W, int H) {
+    const int barH = 56; // alto de la barra
+    SDL_Rect bar{0, H - barH, W, barH};
+
+    // Fondo semitransparente
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+    SDL_RenderFillRect(renderer, &bar);
+
+    // Borde superior
+    SDL_SetRenderDrawColor(renderer, 220, 220, 220, 220);
+    SDL_RenderDrawLine(renderer, 0, H - barH, W, H - barH);
+
+    int x = 12;
+    int y = H - barH + 10;
+
+    // Construimos la cadena "FPS: v1 v2 ... v10" (de viejo → nuevo)
+    std::string s = "FPS: ";
+    for (size_t i = 0; i < fpsHist.size(); ++i) {
+        if (i) s += ' ';
+        s += std::to_string((int)std::round(fpsHist[i]));
+    }
+    drawText(renderer, x, y, SDL_Color{200,200,255,255}, s);
+
+    // Indicamos cuál es el más reciente
+    if (!fpsHist.empty()) {
+        int latest = (int)std::round(fpsHist.back());
+        drawText(renderer, x, y + 22, SDL_Color{220,220,220,255}, std::string("Actual: ") + std::to_string(latest) + " FPS");
     }
 }
+
+// ---------------- Escena principal ----------------
 static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, const std::vector<float>& fpsHist) {
     SDL_SetRenderDrawColor(r, 10, 14, 20, 255);
     SDL_RenderClear(r);
 
-    // Columna izquierda de FPS
-    renderFPSColumn(r, fpsHist);
 
     // Satélites
     for (auto& b : S.sats) {
@@ -240,28 +268,68 @@ static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, co
     SDL_SetRenderDrawColor(r, S.mainB.color.r, S.mainB.color.g, S.mainB.color.b, 255);
     drawFilledCircle(r, (int)std::lround(S.mainB.x), (int)std::lround(S.mainB.y), (int)S.mainB.radius);
 
-    SDL_RenderPresent(r);
+    // Barra inferior con la lista de FPS
+    renderFPSBottomBar(r, fpsHist, p.width, p.height);
 }
 
-// ---------------- Lógica de simulación ----------------
-static void step(SimState& S, const SimParams& p, float dt) {
-    // Principales: mover + paredes + amortiguación
-    S.mainA.x += S.mainA.vx * dt; S.mainA.y += S.mainA.vy * dt;
-    S.mainB.x += S.mainB.vx * dt; S.mainB.y += S.mainB.vy * dt;
-    bounceWalls(S.mainA, p);
-    bounceWalls(S.mainB, p);
-    resolveElasticCollision(S.mainA, S.mainB);
-    S.mainA.vx *= p.mainDamping; S.mainA.vy *= p.mainDamping;
-    S.mainB.vx *= p.mainDamping; S.mainB.vy *= p.mainDamping;
+// ---------------- Overlay/Panel de FPS (tecla F) ----------------
+static void renderFPSOverlay(SDL_Renderer* renderer, const std::vector<float>& fpsLog, int W, int H) {
+    // Panel centrado con fondo semi-transparente
+    int margin = 40;
+    SDL_Rect panel{ margin, margin, W - 2*margin, H - 2*margin };
 
-    // Satélites
-    for (auto& s : S.sats) {
-        if (s.eject_cooldown > 0.f) s.eject_cooldown = std::max(0.f, s.eject_cooldown - dt);
-        applyGravityFromMains(s, S.mainA, S.mainB, p, dt);
-        s.x += s.vx * dt; s.y += s.vy * dt;
-        bounceWalls(s, p);
-        checkEject(s, S.mainA, p);
-        checkEject(s, S.mainB, p);
+    // Fondo translúcido
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 18, 20, 26, 220);
+    SDL_RenderFillRect(renderer, &panel);
+
+    // Borde
+    SDL_SetRenderDrawColor(renderer, 230, 230, 230, 255);
+    SDL_RenderDrawRect(renderer, &panel);
+
+    int x = panel.x + 20;
+    int y = panel.y + 16;
+
+    drawText(renderer, x, y, SDL_Color{160,210,255,255}, "PANEL DE FPS (F para cerrar)");
+    y += 26;
+
+    // Estadísticos rápidos (sobre lo último que tengamos, hasta 300)
+    size_t take = std::min<size_t>(300, fpsLog.size());
+    float avg = 0.f, mn = 1e9f, mx = 0.f;
+    for (size_t i = fpsLog.size() - take; i < fpsLog.size(); ++i) {
+        float v = fpsLog[i];
+        avg += v; mn = std::min(mn, v); mx = std::max(mx, v);
+    }
+    if (take > 0) avg /= float(take); else { mn = 0; mx = 0; }
+    drawText(renderer, x, y, SDL_Color{220,220,220,255},
+        "muestras: " + std::to_string((int)take) +
+        "   avg: " + std::to_string((int)std::round(avg)) +
+        "   min: " + std::to_string((int)std::round(mn)) +
+        "   max: " + std::to_string((int)std::round(mx)));
+    y += 24;
+
+    // Lista grande en columnas
+    int usableH = panel.h - (y - panel.y) - 16;
+    int rowH = 18;
+    int rows = std::max(1, usableH / rowH);
+    int cols = 4; // cuatro columnas
+    int colW = (panel.w - 40) / cols;
+
+    size_t maxItems = (size_t)(rows * cols);
+    size_t count = std::min(maxItems, take);
+
+    // mostramos los últimos 'count' valores
+    size_t start = fpsLog.size() - count;
+    for (int c = 0; c < cols; ++c) {
+        for (int row = 0; row < rows; ++row) {
+            size_t idxInBlock = (size_t)c * (size_t)rows + (size_t)row;
+            size_t i = start + idxInBlock;
+            if (i >= fpsLog.size()) break;
+            int val = (int)std::round(fpsLog[i]);
+            int cx = x + c * colW;
+            int cy = y + row * rowH;
+            drawText(renderer, cx, cy, SDL_Color{240,240,240,255}, std::to_string(val));
+        }
     }
 }
 
@@ -274,19 +342,20 @@ static void drawMenu(SDL_Renderer* ren, const SimParams& P) {
     SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
     SDL_RenderClear(ren);
 
-    drawText(ren, 40,  60, {120,200,255,255}, "SCREENSAVER SECUENCIAL - MENU");
-    drawText(ren, 40, 110, {220,220,220,255}, "N (+/-50): " + std::to_string(P.N) + "  [N / Shift+N]");
-    drawText(ren, 40, 140, {220,220,220,255}, "G (+/-0.5): " + std::to_string(P.G) + "  [G / Shift+G]");
-    drawText(ren, 40, 170, {220,220,220,255}, "W/H (+/-32): " + std::to_string(P.width) + "x" + std::to_string(P.height));
-    drawText(ren, 40, 210, {220,220,220,255}, "Mass A/B (+/-50): " + std::to_string((int)P.mainMassA) + " / " + std::to_string((int)P.mainMassB) + "  [A,B]");
-    drawText(ren, 40, 240, {220,220,220,255}, "Radius A/B (+/-1): " + std::to_string((int)P.mainRadiusA) + " / " + std::to_string((int)P.mainRadiusB) + "  [R,T]");
-    drawText(ren, 40, 270, {220,220,220,255}, "Main init speed (+/-10): " + std::to_string((int)P.mainInitSpeed) + "  [M]");
-    drawText(ren, 40, 300, {220,220,220,255}, "Eject speed (+/-20): " + std::to_string((int)P.ejectSpeed) + "  [E]");
-    drawText(ren, 40, 330, {220,220,220,255}, std::string("Verde: ") + signLabel(P.mainSignA) + "  [Z]    Rojo: " + signLabel(P.mainSignB) + "  [X]");
-    drawText(ren, 40, 360, {200,200,200,255}, "ENTER: iniciar   |   ESC: salir");
+    drawText(ren, 40,  60, SDL_Color{120,200,255,255}, "SCREENSAVER SECUENCIAL - MENU");
+    drawText(ren, 40, 110, SDL_Color{220,220,220,255}, "N (+/-50): " + std::to_string(P.N) + "  [N / Shift+N]");
+    drawText(ren, 40, 140, SDL_Color{220,220,220,255}, "G (+/-0.5): " + std::to_string(P.G) + "  [G / Shift+G]");
+    drawText(ren, 40, 170, SDL_Color{220,220,220,255}, "W/H (+/-32): " + std::to_string(P.width) + "x" + std::to_string(P.height));
+    drawText(ren, 40, 210, SDL_Color{220,220,220,255}, "Mass A/B (+/-50): " + std::to_string((int)P.mainMassA) + " / " + std::to_string((int)P.mainMassB) + "  [A,B]");
+    drawText(ren, 40, 240, SDL_Color{220,220,220,255}, "Radius A/B (+/-1): " + std::to_string((int)P.mainRadiusA) + " / " + std::to_string((int)P.mainRadiusB) + "  [R,T]");
+    drawText(ren, 40, 270, SDL_Color{220,220,220,255}, "Main init speed (+/-10): " + std::to_string((int)P.mainInitSpeed) + "  [M]");
+    drawText(ren, 40, 300, SDL_Color{220,220,220,255}, "Eject speed (+/-20): " + std::to_string((int)P.ejectSpeed) + "  [E]");
+    drawText(ren, 40, 330, SDL_Color{220,220,220,255}, std::string("Verde: ") + signLabel(P.mainSignA) + "  [Z]    Rojo: " + signLabel(P.mainSignB) + "  [X]");
+    drawText(ren, 40, 360, SDL_Color{200,200,200,255}, "ENTER: iniciar   |   ESC: salir");
 
     SDL_RenderPresent(ren);
 }
+
 static Mode runMenu(SDL_Window*& win, SDL_Renderer*& ren, SimParams& P) {
     while (true) {
         SDL_Event e;
@@ -347,6 +416,28 @@ static void parseArgs(int argc, char** argv, SimParams& P) {
     }
 }
 
+// ---------------- Lógica de simulación ----------------
+static void step(SimState& S, const SimParams& p, float dt) {
+    // Principales: mover + paredes + amortiguación
+    S.mainA.x += S.mainA.vx * dt; S.mainA.y += S.mainA.vy * dt;
+    S.mainB.x += S.mainB.vx * dt; S.mainB.y += S.mainB.vy * dt;
+    bounceWalls(S.mainA, p);
+    bounceWalls(S.mainB, p);
+    resolveElasticCollision(S.mainA, S.mainB);
+    S.mainA.vx *= p.mainDamping; S.mainA.vy *= p.mainDamping;
+    S.mainB.vx *= p.mainDamping; S.mainB.vy *= p.mainDamping;
+
+    // Satélites
+    for (auto& s : S.sats) {
+        if (s.eject_cooldown > 0.f) s.eject_cooldown = std::max(0.f, s.eject_cooldown - dt);
+        applyGravityFromMains(s, S.mainA, S.mainB, p, dt);
+        s.x += s.vx * dt; s.y += s.vy * dt;
+        bounceWalls(s, p);
+        checkEject(s, S.mainA, p);
+        checkEject(s, S.mainB, p);
+    }
+}
+
 // ---------------- main ----------------
 int main(int argc, char** argv) {
     std::srand(unsigned(std::time(nullptr)));
@@ -366,8 +457,9 @@ int main(int argc, char** argv) {
         std::cerr << "TTF_Init: " << TTF_GetError() << "\n";
     } else {
         const int fontSize = 18;
-        gFont = TTF_OpenFont("C:\\\\Windows\\\\Fonts\\\\consola.ttf", fontSize);
-        if (!gFont) gFont = TTF_OpenFont("C:\\\\Windows\\\\Fonts\\\\arial.ttf", fontSize);
+        // Windows: intenta Consolas y luego Arial; si falla, hay fallback de "bloques"
+        gFont = TTF_OpenFont("C:\\Windows\\Fonts\\consola.ttf", fontSize);
+        if (!gFont) gFont = TTF_OpenFont("C:\\Windows\\Fonts\\arial.ttf", fontSize);
         if (!gFont) std::cerr << "TTF_OpenFont: " << TTF_GetError() << " (usando fallback de bloques)\n";
     }
 
@@ -380,6 +472,7 @@ int main(int argc, char** argv) {
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
     if (!ren) { std::cerr << "SDL_CreateRenderer error: " << SDL_GetError() << "\n"; return 1; }
     SDL_RenderSetLogicalSize(ren, P.width, P.height);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND); // necesario para los overlays
 
     // Menú
     Mode mode = runMenu(win, ren, P);
@@ -397,9 +490,12 @@ int main(int argc, char** argv) {
     initSim(S, P);
 
     bool running = true;
+    bool showFPSPanel = false;             // <--- tecla F
     Uint64 now = SDL_GetPerformanceCounter();
     Uint64 freq = SDL_GetPerformanceFrequency();
-    std::vector<float> fpsHist; fpsHist.reserve(10);
+
+    std::vector<float> fpsHist10; fpsHist10.reserve(10);
+    std::vector<float> fpsLog;    fpsLog.reserve(300);
 
     while (running) {
         // dt (cap a ~33ms por estabilidad)
@@ -414,19 +510,26 @@ int main(int argc, char** argv) {
             else if (e.type == SDL_KEYDOWN) {
                 if (e.key.keysym.sym == SDLK_ESCAPE) running = false;
                 if (e.key.keysym.sym == SDLK_r) { initSim(S, P); }
+                if (e.key.keysym.sym == SDLK_f) { showFPSPanel = !showFPSPanel; } // toggle overlay
             }
         }
 
         // step
         step(S, P, dt);
 
-        // FPS hist
+        // FPS
         float instFPS = (dt > 0.f) ? (1.f/dt) : 0.f;
-        fpsHist.push_back(instFPS);
-        if (fpsHist.size() > 10) fpsHist.erase(fpsHist.begin());
+        fpsHist10.push_back(instFPS);
+        if (fpsHist10.size() > 10) fpsHist10.erase(fpsHist10.begin());
+        fpsLog.push_back(instFPS);
+        if (fpsLog.size() > 300) fpsLog.erase(fpsLog.begin()); // guardamos los últimos 300
 
-        // render
-        renderSim(ren, S, P, fpsHist);
+        // render (presentamos una sola vez al final)
+        renderSim(ren, S, P, fpsHist10);
+        if (showFPSPanel) {
+            renderFPSOverlay(ren, fpsLog, P.width, P.height);
+        }
+        SDL_RenderPresent(ren);
     }
 
     if (gFont) TTF_CloseFont(gFont);
