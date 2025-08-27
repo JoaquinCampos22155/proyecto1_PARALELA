@@ -1,7 +1,3 @@
-// main.cpp — Screensaver secuencial con SDL2/SDL_ttf (C++17, 1 archivo)
-// Compilar (MSYS2/MinGW64):
-//   g++ -O2 -std=c++17 main.cpp -o screensaver $(pkg-config --cflags --libs sdl2 SDL2_ttf)
-
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <cmath>
@@ -15,11 +11,11 @@
 // ---------------- Utilidades ----------------
 static float frand(float a, float b) { return a + (b - a) * (float(rand()) / float(RAND_MAX)); }
 static float clampf(float x, float a, float b) { return std::max(a, std::min(b, x)); }
-static bool startsWith(const std::string& s, const std::string& pre){ return s.rfind(pre,0)==0; }
+static bool  startsWith(const std::string& s, const std::string& pre){ return s.rfind(pre,0)==0; }
 static float toFloat(const std::string& s, float def){ try{ return std::stof(s);}catch(...){return def;} }
 static int   toInt  (const std::string& s, int def){ try{ return std::stoi(s);}catch(...){return def;} }
 
-// Dibujo de círculo relleno sin librerías extras (SDL2 puro)
+// Círculo relleno sin libs extra (SDL2)
 static void drawFilledCircle(SDL_Renderer* r, int cx, int cy, int radius) {
     for (int y = -radius; y <= radius; ++y) {
         int dx = (int)std::floor(std::sqrt((double)radius*radius - y*y));
@@ -35,27 +31,31 @@ struct Body {
     float mass=1;
     SDL_Color color{255,255,255,255};
     bool is_main=false;       // principales (verde, rojo)
-    float eject_cooldown=0.f; // mientras >0, sin gravedad (tras “salir disparado”)
+    float eject_cooldown=0.f; // cuenta regresiva tras “salir disparado”
 };
 
 struct SimParams {
     int width=960, height=540;
-    int N=600;
+    int N=10000;
 
-    // Gravedad global (↑ subido como pediste; antes 0.25)
-    float G=0.45f;
+    // Gravedad global (con signo por principal)
+    float G=30.5f;
 
-    // Principales (A=verde, B=rojo) — conservé tus tamaños base
-    float mainRadiusA=16.f, mainRadiusB=16.f;
-    float mainMassA=40.f,   mainMassB=40.f;
-    float mainInitSpeed=60.f;   // velocidad inicial máx para A y B
+    // Principales (A=verde, B=rojo)
+    float mainRadiusA=14.f, mainRadiusB=14.f;
+    float mainMassA=50000.f, mainMassB=1000000.f;
+    float mainInitSpeed=100.f; // rapidez inicial
+    float mainDamping=1.0f;    // 1.0 = sin amortiguación
+    float mainSignA=+1.f;      // +1 atrae, -1 repele (verde)
+    float mainSignB=-1.f;      // +1 atrae, -1 repele (rojo) 
 
     // Satélites
     float satRadius=4.f;
     float satMass=1.f;
-    float maxInitSpeed=30.f;    // se usa *0.15 abajo
-    float ejectSpeed=420.f;
-    float ejectCooldownSec=1.2f;
+    float maxInitSpeed=60.f;   // se usa *0.15 abajo
+    float ejectSpeed=200.f;
+    float ejectCooldownSec=0.60f;
+    float postEjectGravityFactor=0.35f; // gravedad parcial al inicio del cooldown
 
     // Físicas comunes
     float wallRestitution=0.95f;
@@ -67,7 +67,7 @@ struct SimState {
     std::vector<Body> sats;
 };
 
-// Colisión elástica 2D entre dos círculos (solo para principales)
+// Colisión elástica 2D entre dos círculos (solo principales)
 static void resolveElasticCollision(Body& a, Body& b) {
     float dx = b.x - a.x, dy = b.y - a.y;
     float dist2 = dx*dx + dy*dy;
@@ -105,22 +105,31 @@ static void bounceWalls(Body& b, const SimParams& p) {
     if (b.y + b.radius > p.height) { b.y = p.height - b.radius; b.vy = -b.vy * p.wallRestitution; }
 }
 
-// Gravedad desde dos principales sobre un satélite (si no está en cooldown)
+// Gravedad con signo y rampa tras eyección
 static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const SimParams& p, float dt) {
-    if (s.eject_cooldown > 0.f) return;
-    auto gravOne = [&](const Body& M){
+    auto gravOne = [&](const Body& M, float sign, float factor){
         float dx = M.x - s.x, dy = M.y - s.y;
         float r2 = dx*dx + dy*dy + p.softening*p.softening;
         float invr = 1.0f / std::sqrt(r2);
         float invr3 = invr*invr*invr;
-        float ax = p.G * M.mass * dx * invr3;
-        float ay = p.G * M.mass * dy * invr3;
+        // sign=+1 atrae, sign=-1 repele
+        float ax = sign * factor * p.G * M.mass * dx * invr3;
+        float ay = sign * factor * p.G * M.mass * dy * invr3;
         s.vx += ax * dt; s.vy += ay * dt;
     };
-    gravOne(A); gravOne(B);
+
+    // Factor de gravedad durante cooldown: de ~35% → 100%
+    float factor = 1.0f;
+    if (s.eject_cooldown > 0.f && p.ejectCooldownSec > 0.f) {
+        float t = 1.f - clampf(s.eject_cooldown / p.ejectCooldownSec, 0.f, 1.f); // 0→1
+        factor = p.postEjectGravityFactor + (1.f - p.postEjectGravityFactor) * t;
+    }
+
+    gravOne(A, p.mainSignA, factor);
+    gravOne(B, p.mainSignB, factor);
 }
 
-// ¿Satélite toca un principal? -> “sale disparado” radialmente y entra en cooldown
+// ¿Satélite toca un principal? -> “sale disparado”
 static void checkEject(Body& s, const Body& M, const SimParams& p) {
     float dx = s.x - M.x, dy = s.y - M.y;
     float dist2 = dx*dx + dy*dy;
@@ -147,14 +156,13 @@ static void initSim(SimState& S, const SimParams& p) {
     S.mainA.x = p.width*0.33f; S.mainA.y = p.height*0.5f;
     S.mainB.x = p.width*0.66f; S.mainB.y = p.height*0.5f;
 
-    // velocidades iniciales controladas por parámetro
     S.mainA.vx = frand(-p.mainInitSpeed, p.mainInitSpeed);
     S.mainA.vy = frand(-p.mainInitSpeed, p.mainInitSpeed);
     S.mainB.vx = frand(-p.mainInitSpeed, p.mainInitSpeed);
     S.mainB.vy = frand(-p.mainInitSpeed, p.mainInitSpeed);
 
-    S.mainA.color = SDL_Color{  0,255,  0,255}; // verde
-    S.mainB.color = SDL_Color{255, 64, 64,255}; // rojo suave
+    S.mainA.color = SDL_Color{  0,255,  0,255}; // verde (atrae)
+    S.mainB.color = SDL_Color{255, 64, 64,255}; // rojo (repele)
 
     // Satélites
     S.sats.resize(p.N);
@@ -178,8 +186,6 @@ static void initSim(SimState& S, const SimParams& p) {
 
 // ---------------- Texto (SDL_ttf + fallback) ----------------
 static TTF_Font* gFont = nullptr;
-
-// Fallback: “bloques” si no hay fuente
 static void drawBlocksText(SDL_Renderer* r, int x, int y, SDL_Color col, const std::string& s) {
     SDL_SetRenderDrawColor(r, col.r, col.g, col.b, col.a);
     int w = 6, h = 10, pad=2;
@@ -189,7 +195,6 @@ static void drawBlocksText(SDL_Renderer* r, int x, int y, SDL_Color col, const s
         SDL_RenderFillRect(r, &rect);
     }
 }
-
 static void drawText(SDL_Renderer* r, int x, int y, SDL_Color col, const std::string& s) {
     if (gFont) {
         SDL_Surface* surf = TTF_RenderUTF8_Blended(gFont, s.c_str(), col);
@@ -205,15 +210,24 @@ static void drawText(SDL_Renderer* r, int x, int y, SDL_Color col, const std::st
             }
         }
     }
-    // Fallback si no hay font o falla el render
     drawBlocksText(r, x, y, col, s);
 }
 
 // ---------------- Render ----------------
-static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, float fps) {
-    // Fondo
+static void renderFPSColumn(SDL_Renderer* r, const std::vector<float>& fpsHist) {
+    const int x0 = 10, y0 = 10, dy = 18;
+    drawText(r, x0, y0, {200,200,200,255}, "FPS (ultimos 10)");
+    for (size_t i=0;i<fpsHist.size(); ++i) {
+        int val = (int)std::round(fpsHist[i]);
+        drawText(r, x0, y0 + (int)((i+1)*dy), {240,240,240,255}, std::to_string(val));
+    }
+}
+static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, const std::vector<float>& fpsHist) {
     SDL_SetRenderDrawColor(r, 10, 14, 20, 255);
     SDL_RenderClear(r);
+
+    // Columna izquierda de FPS
+    renderFPSColumn(r, fpsHist);
 
     // Satélites
     for (auto& b : S.sats) {
@@ -226,21 +240,21 @@ static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, fl
     SDL_SetRenderDrawColor(r, S.mainB.color.r, S.mainB.color.g, S.mainB.color.b, 255);
     drawFilledCircle(r, (int)std::lround(S.mainB.x), (int)std::lround(S.mainB.y), (int)S.mainB.radius);
 
-    // HUD FPS
-    drawText(r, 10, 10, SDL_Color{240,240,240,255}, "FPS: " + std::to_string((int)std::round(fps)));
     SDL_RenderPresent(r);
 }
 
 // ---------------- Lógica de simulación ----------------
 static void step(SimState& S, const SimParams& p, float dt) {
-    // Principales: mover + paredes
+    // Principales: mover + paredes + amortiguación
     S.mainA.x += S.mainA.vx * dt; S.mainA.y += S.mainA.vy * dt;
     S.mainB.x += S.mainB.vx * dt; S.mainB.y += S.mainB.vy * dt;
     bounceWalls(S.mainA, p);
     bounceWalls(S.mainB, p);
     resolveElasticCollision(S.mainA, S.mainB);
+    S.mainA.vx *= p.mainDamping; S.mainA.vy *= p.mainDamping;
+    S.mainB.vx *= p.mainDamping; S.mainB.vy *= p.mainDamping;
 
-    // Satélites: gravedad, mover, paredes, eject
+    // Satélites
     for (auto& s : S.sats) {
         if (s.eject_cooldown > 0.f) s.eject_cooldown = std::max(0.f, s.eject_cooldown - dt);
         applyGravityFromMains(s, S.mainA, S.mainB, p, dt);
@@ -254,23 +268,25 @@ static void step(SimState& S, const SimParams& p, float dt) {
 // ---------------- Menú (escoger) ----------------
 enum class Mode { MENU, RUN, QUIT };
 
+static const char* signLabel(float s){ return (s>=0.f) ? "ATRAE" : "REPELE"; }
+
 static void drawMenu(SDL_Renderer* ren, const SimParams& P) {
     SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
     SDL_RenderClear(ren);
 
     drawText(ren, 40,  60, {120,200,255,255}, "SCREENSAVER SECUENCIAL - MENU");
     drawText(ren, 40, 110, {220,220,220,255}, "N (+/-50): " + std::to_string(P.N) + "  [N / Shift+N]");
-    drawText(ren, 40, 140, {220,220,220,255}, "G (+/-0.05): " + std::to_string(P.G) + "  [G / Shift+G]");
+    drawText(ren, 40, 140, {220,220,220,255}, "G (+/-0.5): " + std::to_string(P.G) + "  [G / Shift+G]");
     drawText(ren, 40, 170, {220,220,220,255}, "W/H (+/-32): " + std::to_string(P.width) + "x" + std::to_string(P.height));
-    drawText(ren, 40, 210, {220,220,220,255}, "Mass A/B (+/-5): " + std::to_string((int)P.mainMassA) + " / " + std::to_string((int)P.mainMassB) + "  [A,B]");
+    drawText(ren, 40, 210, {220,220,220,255}, "Mass A/B (+/-50): " + std::to_string((int)P.mainMassA) + " / " + std::to_string((int)P.mainMassB) + "  [A,B]");
     drawText(ren, 40, 240, {220,220,220,255}, "Radius A/B (+/-1): " + std::to_string((int)P.mainRadiusA) + " / " + std::to_string((int)P.mainRadiusB) + "  [R,T]");
-    drawText(ren, 40, 270, {220,220,220,255}, "Main init speed (+/-5): " + std::to_string((int)P.mainInitSpeed) + "  [M]");
+    drawText(ren, 40, 270, {220,220,220,255}, "Main init speed (+/-10): " + std::to_string((int)P.mainInitSpeed) + "  [M]");
     drawText(ren, 40, 300, {220,220,220,255}, "Eject speed (+/-20): " + std::to_string((int)P.ejectSpeed) + "  [E]");
-    drawText(ren, 40, 340, {200,200,200,255}, "ENTER: iniciar   |   ESC: salir");
+    drawText(ren, 40, 330, {220,220,220,255}, std::string("Verde: ") + signLabel(P.mainSignA) + "  [Z]    Rojo: " + signLabel(P.mainSignB) + "  [X]");
+    drawText(ren, 40, 360, {200,200,200,255}, "ENTER: iniciar   |   ESC: salir");
 
     SDL_RenderPresent(ren);
 }
-
 static Mode runMenu(SDL_Window*& win, SDL_Renderer*& ren, SimParams& P) {
     while (true) {
         SDL_Event e;
@@ -282,15 +298,17 @@ static Mode runMenu(SDL_Window*& win, SDL_Renderer*& ren, SimParams& P) {
                     case SDLK_ESCAPE: return Mode::QUIT;
                     case SDLK_RETURN: return Mode::RUN;
                     case SDLK_n: P.N = std::max(0, P.N + (shift ? -50 : 50)); break;
-                    case SDLK_g: P.G = std::max(0.f, P.G + (shift ? -0.05f : 0.05f)); break;
+                    case SDLK_g: P.G = std::max(0.f, P.G + (shift ? -0.5f : 0.5f)); break;
                     case SDLK_w: P.width  = std::max(640, P.width  + (shift ? -32 : 32)); break;
                     case SDLK_h: P.height = std::max(480, P.height + (shift ? -32 : 32)); break;
-                    case SDLK_a: P.mainMassA = std::max(1.f, P.mainMassA + (shift ? -5.f : 5.f)); break;
-                    case SDLK_b: P.mainMassB = std::max(1.f, P.mainMassB + (shift ? -5.f : 5.f)); break;
+                    case SDLK_a: P.mainMassA = std::max(1.f, P.mainMassA + (shift ? -50.f : 50.f)); break;
+                    case SDLK_b: P.mainMassB = std::max(1.f, P.mainMassB + (shift ? -50.f : 50.f)); break;
                     case SDLK_r: P.mainRadiusA = std::max(2.f, P.mainRadiusA + (shift ? -1.f : 1.f)); break;
                     case SDLK_t: P.mainRadiusB = std::max(2.f, P.mainRadiusB + (shift ? -1.f : 1.f)); break;
-                    case SDLK_m: P.mainInitSpeed = std::max(0.f, P.mainInitSpeed + (shift ? -5.f : 5.f)); break;
-                    case SDLK_e: P.ejectSpeed = std::max(0.f, P.ejectSpeed + (shift ? -20.f : 20.f)); break;
+                    case SDLK_m: P.mainInitSpeed = std::max(0.f, P.mainInitSpeed + (shift ? -10.f : 10.f)); break;
+                    case SDLK_e: P.ejectSpeed   = std::max(0.f, P.ejectSpeed   + (shift ? -20.f : 20.f)); break;
+                    case SDLK_z: P.mainSignA = (P.mainSignA >= 0.f) ? -1.f : +1.f; break; // toggle
+                    case SDLK_x: P.mainSignB = (P.mainSignB >= 0.f) ? -1.f : +1.f; break; // toggle
                     default: break;
                 }
             }
@@ -309,24 +327,23 @@ static Mode runMenu(SDL_Window*& win, SDL_Renderer*& ren, SimParams& P) {
 
 // ---------------- CLI args ----------------
 static void parseArgs(int argc, char** argv, SimParams& P) {
-    // Soporta --clave=valor (con defensiva)
     for (int i=1;i<argc;++i){
         std::string a(argv[i]);
-        if (startsWith(a,"--N="))          P.N = std::max(0, toInt(a.substr(4), P.N));
-        else if (startsWith(a,"--G="))     P.G = std::max(0.f, toFloat(a.substr(4), P.G));
-        else if (startsWith(a,"--width=")) P.width  = std::max(640, toInt(a.substr(8), P.width));
-        else if (startsWith(a,"--height="))P.height = std::max(480, toInt(a.substr(9), P.height));
-        else if (startsWith(a,"--massA=")) P.mainMassA = std::max(1.f, toFloat(a.substr(8), P.mainMassA));
-        else if (startsWith(a,"--massB=")) P.mainMassB = std::max(1.f, toFloat(a.substr(8), P.mainMassB));
-        else if (startsWith(a,"--radiusA=")) P.mainRadiusA = std::max(2.f, toFloat(a.substr(10), P.mainRadiusA));
-        else if (startsWith(a,"--radiusB=")) P.mainRadiusB = std::max(2.f, toFloat(a.substr(10), P.mainRadiusB));
-        else if (startsWith(a,"--mainInit=")) P.mainInitSpeed = std::max(0.f, toFloat(a.substr(11), P.mainInitSpeed));
-        else if (startsWith(a,"--eject="))  P.ejectSpeed = std::max(0.f, toFloat(a.substr(8), P.ejectSpeed));
+        if (startsWith(a,"--N="))              P.N = std::max(0, toInt(a.substr(4), P.N));
+        else if (startsWith(a,"--G="))         P.G = std::max(0.f, toFloat(a.substr(4), P.G));
+        else if (startsWith(a,"--width="))     P.width  = std::max(640, toInt(a.substr(8), P.width));
+        else if (startsWith(a,"--height="))    P.height = std::max(480, toInt(a.substr(9), P.height));
+        else if (startsWith(a,"--massA="))     P.mainMassA = std::max(1.f, toFloat(a.substr(8), P.mainMassA));
+        else if (startsWith(a,"--massB="))     P.mainMassB = std::max(1.f, toFloat(a.substr(8), P.mainMassB));
+        else if (startsWith(a,"--radiusA="))   P.mainRadiusA = std::max(2.f, toFloat(a.substr(10), P.mainRadiusA));
+        else if (startsWith(a,"--radiusB="))   P.mainRadiusB = std::max(2.f, toFloat(a.substr(10), P.mainRadiusB));
+        else if (startsWith(a,"--mainInit="))  P.mainInitSpeed = std::max(0.f, toFloat(a.substr(11), P.mainInitSpeed));
+        else if (startsWith(a,"--eject="))     P.ejectSpeed = std::max(0.f, toFloat(a.substr(8), P.ejectSpeed));
         else if (startsWith(a,"--satRadius=")) P.satRadius = std::max(1.f, toFloat(a.substr(12), P.satRadius));
         else if (startsWith(a,"--satMass="))   P.satMass   = std::max(0.1f, toFloat(a.substr(10), P.satMass));
-        else {
-            std::cerr << "[warn] Arg no reconocido: " << a << "\n";
-        }
+        else if (startsWith(a,"--signA="))     P.mainSignA = clampf(toFloat(a.substr(8), P.mainSignA), -1.f, +1.f);
+        else if (startsWith(a,"--signB="))     P.mainSignB = clampf(toFloat(a.substr(8), P.mainSignB), -1.f, +1.f);
+        else std::cerr << "[warn] Arg no reconocido: " << a << "\n";
     }
 }
 
@@ -334,7 +351,7 @@ static void parseArgs(int argc, char** argv, SimParams& P) {
 int main(int argc, char** argv) {
     std::srand(unsigned(std::time(nullptr)));
     SimParams P;
-    parseArgs(argc, argv, P); // lectura de argumentos (parametrización)
+    parseArgs(argc, argv, P);
 
     // Ventana mínima 640x480
     P.width = std::max(P.width, 640);
@@ -345,19 +362,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Texto (SDL_ttf) — si falla, seguimos con fallback
     if (TTF_Init() != 0) {
         std::cerr << "TTF_Init: " << TTF_GetError() << "\n";
     } else {
         const int fontSize = 18;
-        // Intentamos fuentes típicas de Windows
         gFont = TTF_OpenFont("C:\\\\Windows\\\\Fonts\\\\consola.ttf", fontSize);
         if (!gFont) gFont = TTF_OpenFont("C:\\\\Windows\\\\Fonts\\\\arial.ttf", fontSize);
         if (!gFont) std::cerr << "TTF_OpenFont: " << TTF_GetError() << " (usando fallback de bloques)\n";
     }
 
     SDL_Window* win = SDL_CreateWindow(
-        "Screensaver Secuencial (SDL2)",
+        "Screensaver Secuencial (SDL2) — Verde atrae / Rojo repele",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         P.width, P.height, SDL_WINDOW_SHOWN);
     if (!win) { std::cerr << "SDL_CreateWindow error: " << SDL_GetError() << "\n"; return 1; }
@@ -384,13 +399,13 @@ int main(int argc, char** argv) {
     bool running = true;
     Uint64 now = SDL_GetPerformanceCounter();
     Uint64 freq = SDL_GetPerformanceFrequency();
-    float fps = 0.f, fpsFilter = 0.1f;
+    std::vector<float> fpsHist; fpsHist.reserve(10);
 
     while (running) {
-        // dt
+        // dt (cap a ~33ms por estabilidad)
         Uint64 last = now; now = SDL_GetPerformanceCounter();
         float dt = float(now - last) / float(freq);
-        dt = clampf(dt, 0.f, 0.033f); // dt máx ~33ms
+        dt = clampf(dt, 0.f, 0.033f);
 
         // eventos
         SDL_Event e;
@@ -398,22 +413,22 @@ int main(int argc, char** argv) {
             if (e.type == SDL_QUIT) running = false;
             else if (e.type == SDL_KEYDOWN) {
                 if (e.key.keysym.sym == SDLK_ESCAPE) running = false;
-                if (e.key.keysym.sym == SDLK_r) { initSim(S, P); } // reinicio rápido
+                if (e.key.keysym.sym == SDLK_r) { initSim(S, P); }
             }
         }
 
         // step
         step(S, P, dt);
 
-        // FPS
+        // FPS hist
         float instFPS = (dt > 0.f) ? (1.f/dt) : 0.f;
-        fps = (1.f - fpsFilter) * fps + fpsFilter * instFPS;
+        fpsHist.push_back(instFPS);
+        if (fpsHist.size() > 10) fpsHist.erase(fpsHist.begin());
 
         // render
-        renderSim(ren, S, P, fps);
+        renderSim(ren, S, P, fpsHist);
     }
 
-    // Limpieza
     if (gFont) TTF_CloseFont(gFont);
     TTF_Quit();
     SDL_DestroyRenderer(ren);
