@@ -32,7 +32,11 @@ g++ -O2 -std=c++17 -Wall -Wextra -Wshadow main_par.cpp -o screensaver $(pkg-conf
 
 ### Ejecución
 Secuencial:
-./screensaver 
+```
+./screensaver
+```
 
 Paralelo (el número de hilos se puede cambiar):
+```
 OMP_NUM_THREADS=8 ./screensaver
+```
