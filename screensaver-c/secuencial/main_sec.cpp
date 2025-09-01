@@ -74,6 +74,7 @@ struct SimParams {
 
 struct SimState {
     Body mainA, mainB;
+    Body mainA2, mainB2;
     std::vector<Body> sats;
 };
 
@@ -116,7 +117,7 @@ static void bounceWalls(Body& b, const SimParams& p) {
 }
 
 // Gravedad con signo y rampa tras eyección
-static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const SimParams& p, float dt) {
+static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const Body& A2, const Body& B2, const SimParams& p, float dt) {
     auto gravOne = [&](const Body& M, float sign, float factor){
         float dx = M.x - s.x, dy = M.y - s.y;
         float r2 = dx*dx + dy*dy + p.softening*p.softening;
@@ -137,6 +138,8 @@ static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const S
 
     gravOne(A, p.mainSignA, factor);
     gravOne(B, p.mainSignB, factor);
+    gravOne(A2, p.mainSignA, factor);
+    gravOne(B2, p.mainSignB, factor);
 }
 
 // ¿Satélite toca un principal? -> “sale disparado”
@@ -173,6 +176,15 @@ static void initSim(SimState& S, const SimParams& p) {
 
     S.mainA.color = SDL_Color{  0,255,  0,255}; // verde (atrae)
     S.mainB.color = SDL_Color{255, 64, 64,255}; // rojo (repele)
+
+    S.mainA2 = S.mainA;
+    S.mainB2 = S.mainB; 
+
+    S.mainB2.x = p.width*0.33f; S.mainA2.y = p.height*0.25f;
+    S.mainA2.x = p.width*0.66f; S.mainB2.y = p.height*0.75f;
+
+    S.mainA2.color = SDL_Color{  0,255,  0,255};     // verde
+    S.mainB2.color = SDL_Color{255, 64, 64,255};   // rojo
 
     // Satélites
     S.sats.resize(p.N);
@@ -271,6 +283,10 @@ static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, co
     drawFilledCircle(r, (int)std::lround(S.mainA.x), (int)std::lround(S.mainA.y), (int)S.mainA.radius);
     SDL_SetRenderDrawColor(r, S.mainB.color.r, S.mainB.color.g, S.mainB.color.b, 255);
     drawFilledCircle(r, (int)std::lround(S.mainB.x), (int)std::lround(S.mainB.y), (int)S.mainB.radius);
+    SDL_SetRenderDrawColor(r, S.mainA2.color.r, S.mainA2.color.g, S.mainA2.color.b, 255);
+    drawFilledCircle(r, (int)std::lround(S.mainA2.x), (int)std::lround(S.mainA2.y), (int)S.mainA2.radius);
+    SDL_SetRenderDrawColor(r, S.mainB2.color.r, S.mainB2.color.g, S.mainB2.color.b, 255);
+    drawFilledCircle(r, (int)std::lround(S.mainB2.x), (int)std::lround(S.mainB2.y), (int)S.mainB2.radius);
 
     // Barra inferior con la lista de FPS
     renderFPSBottomBar(r, fpsHist, p.width, p.height);
@@ -425,22 +441,36 @@ static void parseArgs(int argc, char** argv, SimParams& P) {
 // ---------------- Lógica de simulación ----------------
 static void step(SimState& S, const SimParams& p, float dt) {
     // Principales: mover + paredes + amortiguación
-    S.mainA.x += S.mainA.vx * dt; S.mainA.y += S.mainA.vy * dt;
-    S.mainB.x += S.mainB.vx * dt; S.mainB.y += S.mainB.vy * dt;
-    bounceWalls(S.mainA, p);
-    bounceWalls(S.mainB, p);
-    resolveElasticCollision(S.mainA, S.mainB);
-    S.mainA.vx *= p.mainDamping; S.mainA.vy *= p.mainDamping;
-    S.mainB.vx *= p.mainDamping; S.mainB.vy *= p.mainDamping;
+    auto moveMain = [&](Body& M){
+        M.x += M.vx * dt;
+        M.y += M.vy * dt;
+        bounceWalls(M, p);
+        M.vx *= p.mainDamping;
+        M.vy *= p.mainDamping;
+    };
+
+    moveMain(S.mainA);
+    moveMain(S.mainB);
+    moveMain(S.mainA2);
+    moveMain(S.mainB2);
+
+    resolveElasticCollision(S.mainA,  S.mainB);
+    resolveElasticCollision(S.mainA,  S.mainA2);
+    resolveElasticCollision(S.mainA,  S.mainB2);
+    resolveElasticCollision(S.mainB,  S.mainA2);
+    resolveElasticCollision(S.mainB,  S.mainB2);
+    resolveElasticCollision(S.mainA2, S.mainB2);
 
     // Satélites
     for (auto& s : S.sats) {
         if (s.eject_cooldown > 0.f) s.eject_cooldown = std::max(0.f, s.eject_cooldown - dt);
-        applyGravityFromMains(s, S.mainA, S.mainB, p, dt);
+        applyGravityFromMains(s, S.mainA, S.mainB, S.mainA2, S.mainB2, p, dt);
         s.x += s.vx * dt; s.y += s.vy * dt;
         bounceWalls(s, p);
         checkEject(s, S.mainA, p);
         checkEject(s, S.mainB, p);
+        checkEject(s, S.mainA2, p);
+        checkEject(s, S.mainB2, p);
     }
 }
 
