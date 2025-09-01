@@ -257,12 +257,37 @@ static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, co
     SDL_SetRenderDrawColor(r, 10, 14, 20, 255);
     SDL_RenderClear(r);
 
-
     // Satélites
-    for (auto& b : S.sats) {
-        SDL_SetRenderDrawColor(r, b.color.r, b.color.g, b.color.b, 255);
-        drawFilledCircle(r, (int)std::lround(b.x), (int)std::lround(b.y), (int)b.radius);
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, p.width, p.height, 32, SDL_PIXELFORMAT_RGBA8888);
+    Uint32* pixels = (Uint32*)surface->pixels;
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < (int)S.sats.size(); i++) {
+        const Body& b = S.sats[i];
+        int cx = (int)std::lround(b.x);
+        int cy = (int)std::lround(b.y);
+        int rad = (int)std::lround(b.radius);  // usa el radius definido en tu SimParams
+
+        Uint32 color = SDL_MapRGBA(surface->format, b.color.r, b.color.g, b.color.b, 255);
+
+        for (int dy = -rad; dy <= rad; dy++) {
+            for (int dx = -rad; dx <= rad; dx++) {
+                if (dx*dx + dy*dy <= rad*rad) {  // dentro del círculo
+                    int x = cx + dx;
+                    int y = cy + dy;
+                    if (x >= 0 && x < p.width && y >= 0 && y < p.height) {
+                        pixels[y * p.width + x] = color;
+                    }
+                }
+            }
+        }
     }
+
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(r, surface);
+    SDL_FreeSurface(surface);
+    SDL_RenderCopy(r, tex, nullptr, nullptr);
+    SDL_DestroyTexture(tex);
+
     // Principales
     SDL_SetRenderDrawColor(r, S.mainA.color.r, S.mainA.color.g, S.mainA.color.b, 255);
     drawFilledCircle(r, (int)std::lround(S.mainA.x), (int)std::lround(S.mainA.y), (int)S.mainA.radius);
