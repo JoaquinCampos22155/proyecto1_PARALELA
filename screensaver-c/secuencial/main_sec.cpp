@@ -66,6 +66,10 @@ struct SimParams {
     // Físicas comunes
     float wallRestitution=0.95f;
     float softening=8.0f;
+
+    // Benchmark mode
+    bool benchmark = false;
+    int benchmarkFrames = 500;
 };
 
 struct SimState {
@@ -412,6 +416,8 @@ static void parseArgs(int argc, char** argv, SimParams& P) {
         else if (startsWith(a,"--satMass="))   P.satMass   = std::max(0.1f, toFloat(a.substr(10), P.satMass));
         else if (startsWith(a,"--signA="))     P.mainSignA = clampf(toFloat(a.substr(8), P.mainSignA), -1.f, +1.f);
         else if (startsWith(a,"--signB="))     P.mainSignB = clampf(toFloat(a.substr(8), P.mainSignB), -1.f, +1.f);
+        else if (a == "--benchmark")  P.benchmark = true;
+        else if (startsWith(a,"--frames=")) P.benchmarkFrames = std::max(1, toInt(a.substr(9), P.benchmarkFrames));
         else std::cerr << "[warn] Arg no reconocido: " << a << "\n";
     }
 }
@@ -473,6 +479,36 @@ int main(int argc, char** argv) {
     if (!ren) { std::cerr << "SDL_CreateRenderer error: " << SDL_GetError() << "\n"; return 1; }
     SDL_RenderSetLogicalSize(ren, P.width, P.height);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND); // necesario para los overlays
+
+    // Benchmark mode
+    if (P.benchmark) {
+        SimState S;
+        initSim(S, P);
+
+        Uint64 t0 = SDL_GetPerformanceCounter();
+
+        for (int frame = 0; frame < P.benchmarkFrames; frame++) {
+            // dt fijo (~16 ms ≈ 60 FPS target)
+            float dt = 0.016f;
+            step(S, P, dt);
+
+            renderSim(ren, S, P, {}); // {} = sin historial de FPS
+            SDL_RenderPresent(ren);
+        }
+
+        Uint64 t1 = SDL_GetPerformanceCounter();
+        double ms = (t1 - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+        std::cout << "[Benchmark] Frames: " << P.benchmarkFrames
+                << "  Tiempo total: " << ms << " ms"
+                << "  Avg por frame: " << (ms / P.benchmarkFrames) << " ms\n";
+
+        if (gFont) TTF_CloseFont(gFont);
+        TTF_Quit();
+        SDL_DestroyRenderer(ren);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return 0;
+    }
 
     // Menú
     Mode mode = runMenu(win, ren, P);
