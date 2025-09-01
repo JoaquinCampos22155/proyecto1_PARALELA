@@ -51,7 +51,7 @@ struct SimParams {
     // Principales (A=verde, B=rojo)
     float mainRadiusA=14.f, mainRadiusB=14.f;
     float mainMassA=50000.f, mainMassB=1000000.f;
-    float mainInitSpeed=100.f; // rapidez inicial
+    float mainInitSpeed=300.f; // rapidez inicial
     float mainDamping=1.0f;    // 1.0 = sin amortiguación
     float mainSignA=+1.f;      // +1 atrae, -1 repele (verde)
     float mainSignB=-1.f;      // +1 atrae, -1 repele (rojo)
@@ -67,12 +67,18 @@ struct SimParams {
     // Físicas comunes
     float wallRestitution=0.95f;
     float softening=8.0f;
+
+    // Benchmark mode
+    bool benchmark = false;
+    int benchmarkFrames = 500;
 };
 
 struct SimState {
     Body mainA, mainB;
+    Body mainA2, mainB2;
     std::vector<Body> sats;
 };
+
 
 // Colisión elástica 2D entre dos círculos (solo principales)
 static void resolveElasticCollision(Body& a, Body& b) {
@@ -113,7 +119,7 @@ static void bounceWalls(Body& b, const SimParams& p) {
 }
 
 // Gravedad con signo y rampa tras eyección
-static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const SimParams& p, float dt) {
+static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const Body& A2, const Body& B2, const SimParams& p, float dt) {
     auto gravOne = [&](const Body& M, float sign, float factor){
         float dx = M.x - s.x, dy = M.y - s.y;
         float r2 = dx*dx + dy*dy + p.softening*p.softening;
@@ -134,6 +140,8 @@ static void applyGravityFromMains(Body& s, const Body& A, const Body& B, const S
 
     gravOne(A, p.mainSignA, factor);
     gravOne(B, p.mainSignB, factor);
+    gravOne(A2, p.mainSignA, factor);
+    gravOne(B2, p.mainSignB, factor);
 }
 
 // ¿Satélite toca un principal? -> “sale disparado”
@@ -160,7 +168,7 @@ static void initSim(SimState& S, const SimParams& p) {
     S.mainA.is_main = true;  S.mainA.radius = p.mainRadiusA; S.mainA.mass = p.mainMassA;
     S.mainB.is_main = true;  S.mainB.radius = p.mainRadiusB; S.mainB.mass = p.mainMassB;
 
-    S.mainA.x = p.width*0.33f; S.mainA.y = p.height*0.5f;
+    S.mainA.x = p.width*0.25f; S.mainA.y = p.height*0.5f;
     S.mainB.x = p.width*0.66f; S.mainB.y = p.height*0.5f;
 
     S.mainA.vx = frand(-p.mainInitSpeed, p.mainInitSpeed);
@@ -170,6 +178,15 @@ static void initSim(SimState& S, const SimParams& p) {
 
     S.mainA.color = SDL_Color{  0,255,  0,255}; // verde (atrae)
     S.mainB.color = SDL_Color{255, 64, 64,255}; // rojo (repele)
+
+    S.mainA2 = S.mainA;
+    S.mainB2 = S.mainB; 
+
+    S.mainB2.x = p.width*0.33f; S.mainA2.y = p.height*0.25f;
+    S.mainA2.x = p.width*0.66f; S.mainB2.y = p.height*0.75f;
+
+    S.mainA2.color = SDL_Color{  0,255,  0,255};     // verde
+    S.mainB2.color = SDL_Color{255, 64, 64,255};   // rojo
 
     // Satélites
     S.sats.resize(p.N);
@@ -293,6 +310,10 @@ static void renderSim(SDL_Renderer* r, const SimState& S, const SimParams& p, co
     drawFilledCircle(r, (int)std::lround(S.mainA.x), (int)std::lround(S.mainA.y), (int)S.mainA.radius);
     SDL_SetRenderDrawColor(r, S.mainB.color.r, S.mainB.color.g, S.mainB.color.b, 255);
     drawFilledCircle(r, (int)std::lround(S.mainB.x), (int)std::lround(S.mainB.y), (int)S.mainB.radius);
+    SDL_SetRenderDrawColor(r, S.mainA2.color.r, S.mainA2.color.g, S.mainA2.color.b, 255);
+    drawFilledCircle(r, (int)std::lround(S.mainA2.x), (int)std::lround(S.mainA2.y), (int)S.mainA2.radius);
+    SDL_SetRenderDrawColor(r, S.mainB2.color.r, S.mainB2.color.g, S.mainB2.color.b, 255);
+    drawFilledCircle(r, (int)std::lround(S.mainB2.x), (int)std::lround(S.mainB2.y), (int)S.mainB2.radius);
 
     // Barra inferior con la lista de FPS
     renderFPSBottomBar(r, fpsHist, p.width, p.height);
@@ -438,6 +459,8 @@ static void parseArgs(int argc, char** argv, SimParams& P) {
         else if (startsWith(a,"--satMass="))   P.satMass   = std::max(0.1f, toFloat(a.substr(10), P.satMass));
         else if (startsWith(a,"--signA="))     P.mainSignA = clampf(toFloat(a.substr(8), P.mainSignA), -1.f, +1.f);
         else if (startsWith(a,"--signB="))     P.mainSignB = clampf(toFloat(a.substr(8), P.mainSignB), -1.f, +1.f);
+        else if (a == "--benchmark")  P.benchmark = true;
+        else if (startsWith(a,"--frames=")) P.benchmarkFrames = std::max(1, toInt(a.substr(9), P.benchmarkFrames));
         else std::cerr << "[warn] Arg no reconocido: " << a << "\n";
     }
 }
@@ -445,23 +468,34 @@ static void parseArgs(int argc, char** argv, SimParams& P) {
 // ---------------- Lógica de simulación ----------------
 static void step(SimState& S, const SimParams& p, float dt) {
     // Principales: mover + paredes + amortiguación
-    S.mainA.x += S.mainA.vx * dt; S.mainA.y += S.mainA.vy * dt;
-    S.mainB.x += S.mainB.vx * dt; S.mainB.y += S.mainB.vy * dt;
-    bounceWalls(S.mainA, p);
-    bounceWalls(S.mainB, p);
-    resolveElasticCollision(S.mainA, S.mainB);
-    S.mainA.vx *= p.mainDamping; S.mainA.vy *= p.mainDamping;
-    S.mainB.vx *= p.mainDamping; S.mainB.vy *= p.mainDamping;
+    auto moveMain = [&](Body& M){
+        M.x += M.vx * dt;
+        M.y += M.vy * dt;
+        bounceWalls(M, p);
+        M.vx *= p.mainDamping;
+        M.vy *= p.mainDamping;
+    };
+
+    moveMain(S.mainA);
+    moveMain(S.mainB);
+    moveMain(S.mainA2);
+    moveMain(S.mainB2);
+
+    resolveElasticCollision(S.mainA,  S.mainB);
+    resolveElasticCollision(S.mainA,  S.mainA2);
+    resolveElasticCollision(S.mainA,  S.mainB2);
+    resolveElasticCollision(S.mainB,  S.mainA2);
+    resolveElasticCollision(S.mainB,  S.mainB2);
+    resolveElasticCollision(S.mainA2, S.mainB2);
 
     // Satélites (PARALELIZADOS)
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < (int)S.sats.size(); i++) {
         Body& s = S.sats[i];
-
         if (s.eject_cooldown > 0.f)
             s.eject_cooldown = std::max(0.f, s.eject_cooldown - dt);
 
-        applyGravityFromMains(s, S.mainA, S.mainB, p, dt);
+        applyGravityFromMains(s, S.mainA, S.mainB, S.mainA2, S.mainB2, p, dt);
 
         s.x += s.vx * dt;
         s.y += s.vy * dt;
@@ -470,6 +504,8 @@ static void step(SimState& S, const SimParams& p, float dt) {
 
         checkEject(s, S.mainA, p);
         checkEject(s, S.mainB, p);
+        checkEject(s, S.mainA2, p);
+        checkEject(s, S.mainB2, p);
     }
 }
 
@@ -508,6 +544,36 @@ int main(int argc, char** argv) {
     if (!ren) { std::cerr << "SDL_CreateRenderer error: " << SDL_GetError() << "\n"; return 1; }
     SDL_RenderSetLogicalSize(ren, P.width, P.height);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND); // necesario para los overlays
+
+    // Benchmark mode
+    if (P.benchmark) {
+        SimState S;
+        initSim(S, P);
+
+        Uint64 t0 = SDL_GetPerformanceCounter();
+
+        for (int frame = 0; frame < P.benchmarkFrames; frame++) {
+            // dt fijo (~16 ms ≈ 60 FPS target)
+            float dt = 0.016f;
+            step(S, P, dt);
+
+            renderSim(ren, S, P, {}); // {} = sin historial de FPS
+            SDL_RenderPresent(ren);
+        }
+
+        Uint64 t1 = SDL_GetPerformanceCounter();
+        double ms = (t1 - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+        std::cout << "[Benchmark] Frames: " << P.benchmarkFrames
+                << "  Tiempo total: " << ms << " ms"
+                << "  Avg por frame: " << (ms / P.benchmarkFrames) << " ms\n";
+
+        if (gFont) TTF_CloseFont(gFont);
+        TTF_Quit();
+        SDL_DestroyRenderer(ren);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return 0;
+    }
 
     // Menú
     Mode mode = runMenu(win, ren, P);
