@@ -40,3 +40,8 @@ Paralelo (el número de hilos se puede cambiar):
 ```
 OMP_NUM_THREADS=8 ./screensaver
 ```
+
+
+
+---
+python3 bench_speedup.py --seq ./secuencial/screensaver.exe --par ./paralelo/screensaver.exe --frames 500 --runs 10 --outdir bitacora
